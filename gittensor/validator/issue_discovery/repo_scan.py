@@ -25,7 +25,7 @@ from gittensor.constants import (
     REPO_SCAN_GLOBAL_CAP,
     REPO_SCAN_PER_REPO_CAP,
 )
-from gittensor.utils.github_api_tools import find_solver_from_cross_references
+from gittensor.utils.github_api_tools import find_solver_from_cross_references, make_headers
 from gittensor.validator.utils.load_weights import RepositoryConfig
 
 
@@ -202,7 +202,7 @@ async def _scan_repo(
 
 def _fetch_closed_issues(repo_name: str, since: str, token: str) -> List[dict]:
     """Fetch closed issues from a repo via REST API with pagination."""
-    headers = {'Authorization': f'token {token}', 'Accept': 'application/vnd.github.v3+json'}
+    headers = make_headers(token)
     all_issues: List[dict] = []
     page = 1
 
