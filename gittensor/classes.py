@@ -11,8 +11,6 @@ import bittensor as bt
 from gittensor.constants import MAX_CODE_DENSITY_MULTIPLIER, MIN_TOKEN_SCORE_FOR_BASE_SCORE
 from gittensor.utils.utils import parse_repo_name
 
-GITHUB_DOMAIN = 'https://github.com/'
-
 
 class PRState(Enum):
     """PR state for scoring"""
