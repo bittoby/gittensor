@@ -49,6 +49,53 @@ class TestIsValidIssueStateReasonGate:
         assert is_valid_issue(issue, pr) is expected
 
 
+class TestIsValidIssueOpenPRStateReason:
+    """Open PRs must also reject closed non-COMPLETED issues (blocks collateral inflation)."""
+
+    @pytest.mark.parametrize(
+        'state_reason,expected',
+        [
+            ('COMPLETED', True),
+            ('NOT_PLANNED', False),
+            ('DUPLICATE', False),
+            ('TRANSFERRED', False),
+        ],
+    )
+    def test_open_pr_rejects_closed_non_completed_issue(
+        self, pr_factory, issue_factory, state_reason, expected
+    ):
+        now = datetime.now(timezone.utc)
+        pr = pr_factory.open()
+        pr.author_login = 'miner_user'
+        pr.created_at = now - timedelta(days=1)
+
+        issue = issue_factory.create(
+            author_login='other_user',
+            created_at=now - timedelta(days=5),
+            closed_at=now,
+            state='CLOSED',
+            state_reason=state_reason,
+        )
+
+        assert is_valid_issue(issue, pr) is expected
+
+    def test_open_pr_accepts_still_open_issue(self, pr_factory, issue_factory):
+        now = datetime.now(timezone.utc)
+        pr = pr_factory.open()
+        pr.author_login = 'miner_user'
+        pr.created_at = now - timedelta(days=1)
+
+        issue = issue_factory.create(
+            author_login='other_user',
+            created_at=now - timedelta(days=5),
+            closed_at=None,
+            state='OPEN',
+            state_reason=None,
+        )
+
+        assert is_valid_issue(issue, pr) is True
+
+
 class TestIsValidIssueCloseWindow:
     """Close-window must be directional: reject issues closed before pr.merged_at."""
 

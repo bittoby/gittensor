@@ -468,6 +468,12 @@ def is_valid_issue(issue: Issue, pr: PullRequest) -> bool:
         bt.logging.warning(f'Skipping issue #{issue.number} - Issue was created after PR was created')
         return False
 
+    if issue.state == 'CLOSED' and issue.state_reason != 'COMPLETED':
+        bt.logging.warning(
+            f'Skipping issue #{issue.number} - state_reason={issue.state_reason}, only COMPLETED grants multiplier'
+        )
+        return False
+
     if is_merged and pr.merged_at:
         if pr.last_edited_at and pr.last_edited_at > pr.merged_at:
             bt.logging.warning(f'Skipping issue #{issue.number} - PR was edited after merge')
@@ -475,12 +481,6 @@ def is_valid_issue(issue: Issue, pr: PullRequest) -> bool:
 
         if issue.state and issue.state != 'CLOSED':
             bt.logging.warning(f'Skipping issue #{issue.number} - Issue state not CLOSED (state: {issue.state})')
-            return False
-
-        if issue.state_reason != 'COMPLETED':
-            bt.logging.warning(
-                f'Skipping issue #{issue.number} - state_reason={issue.state_reason}, only COMPLETED grants multiplier'
-            )
             return False
 
         if issue.closed_at and pr.merged_at:
