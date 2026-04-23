@@ -905,6 +905,17 @@ def should_skip_merged_pr(
     return (False, None)
 
 
+def should_stop_pr_pagination_early(prs: List[Dict], lookback_date_filter: datetime) -> tuple[bool, Optional[datetime]]:
+    if not prs:
+        return False, None
+
+    if any(pr.get('state') == PRState.OPEN.value for pr in prs):
+        return False, None
+
+    oldest_pr_created_at = parse_github_iso_to_utc(prs[-1]['createdAt'])
+    return oldest_pr_created_at < lookback_date_filter, oldest_pr_created_at
+
+
 def load_miners_prs(
     miner_eval: MinerEvaluation, master_repositories: Dict[str, RepositoryConfig], max_prs: int = 1000
 ) -> None:
@@ -1019,6 +1030,15 @@ def load_miners_prs(
                     bt.logging.warning(f'Error processing PR #{pr_number}, skipping: {e}')
 
             if not page_info.get('hasNextPage') or len(prs) == 0:
+                break
+
+            should_stop_early, oldest_pr_created_at = should_stop_pr_pagination_early(prs, lookback_date_filter)
+            if should_stop_early:
+                assert oldest_pr_created_at is not None
+                bt.logging.debug(
+                    f'Stopping PR pagination early: oldest createdAt on page is '
+                    f'{oldest_pr_created_at.date()}, before {PR_LOOKBACK_DAYS}-day window and no open PRs on page.'
+                )
                 break
 
             cursor = page_info.get('endCursor')

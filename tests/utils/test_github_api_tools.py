@@ -1059,6 +1059,7 @@ class TestCheckGithubIssueClosed:
 # ============================================================================
 
 load_miners_prs = github_api_tools.load_miners_prs
+should_stop_pr_pagination_early = github_api_tools.should_stop_pr_pagination_early
 
 
 def _make_pr_node(
@@ -1110,15 +1111,18 @@ def _make_pr_node(
     }
 
 
-def _make_graphql_response(pr_nodes):
+def _make_graphql_response(pr_nodes, page_info=None):
     """Wrap PR nodes in the full GraphQL response structure."""
+    if page_info is None:
+        page_info = {'hasNextPage': False, 'endCursor': None}
+
     mock_response = Mock()
     mock_response.status_code = 200
     mock_response.json.return_value = {
         'data': {
             'node': {
                 'pullRequests': {
-                    'pageInfo': {'hasNextPage': False, 'endCursor': None},
+                    'pageInfo': page_info,
                     'nodes': pr_nodes,
                 }
             }
@@ -1127,6 +1131,86 @@ def _make_graphql_response(pr_nodes):
     from gittensor.utils.github_api_tools import GraphQLPageResult
 
     return GraphQLPageResult(response=mock_response, page_size=100)
+
+
+class TestLoadMinersPrsPaginationEarlyStop:
+    """Test timestamp-bounded PR pagination."""
+
+    def test_should_stop_when_page_is_old_and_has_no_open_prs(self):
+        lookback = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        prs = [
+            {'state': 'MERGED', 'createdAt': '2026-03-02T00:00:00Z'},
+            {'state': 'CLOSED', 'createdAt': '2026-02-28T00:00:00Z'},
+        ]
+
+        should_stop, oldest_created_at = should_stop_pr_pagination_early(prs, lookback)
+
+        assert should_stop is True
+        assert oldest_created_at == datetime(2026, 2, 28, tzinfo=timezone.utc)
+
+    def test_should_not_stop_when_old_page_has_open_pr(self):
+        lookback = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        prs = [
+            {'state': 'MERGED', 'createdAt': '2026-03-02T00:00:00Z'},
+            {'state': 'OPEN', 'createdAt': '2026-02-28T00:00:00Z'},
+        ]
+
+        should_stop, oldest_created_at = should_stop_pr_pagination_early(prs, lookback)
+
+        assert should_stop is False
+        assert oldest_created_at is None
+
+    @patch('gittensor.utils.github_api_tools.get_github_graphql_query')
+    @patch('gittensor.utils.github_api_tools.bt.logging')
+    def test_load_miners_prs_stops_after_old_non_open_page(self, mock_logging, mock_graphql_query):
+        from gittensor.classes import MinerEvaluation
+        from gittensor.validator.utils.load_weights import RepositoryConfig
+
+        old_created = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        old_merged = (datetime.now(timezone.utc) - timedelta(days=59)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        old_pr = _make_pr_node(1, 'goodorg', 'goodrepo', created_at=old_created, merged_at=old_merged)
+
+        mock_graphql_query.return_value = _make_graphql_response(
+            [old_pr],
+            page_info={'hasNextPage': True, 'endCursor': 'next-page'},
+        )
+
+        miner_eval = MinerEvaluation(uid=74, hotkey='test_hotkey', github_id='12345', github_pat='fake_pat')
+
+        load_miners_prs(miner_eval, {'goodorg/goodrepo': RepositoryConfig(weight=1.0)})
+
+        assert mock_graphql_query.call_count == 1
+        assert len(miner_eval.merged_pull_requests) == 0
+        assert any('Stopping PR pagination early' in str(c) for c in mock_logging.debug.call_args_list)
+
+    @patch('gittensor.utils.github_api_tools.get_github_graphql_query')
+    @patch('gittensor.utils.github_api_tools.bt.logging')
+    def test_load_miners_prs_continues_after_old_open_pr_page(self, mock_logging, mock_graphql_query):
+        from gittensor.classes import MinerEvaluation
+        from gittensor.validator.utils.load_weights import RepositoryConfig
+
+        old_created = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        old_open_pr = _make_pr_node(
+            1,
+            'goodorg',
+            'goodrepo',
+            state='OPEN',
+            created_at=old_created,
+            merged_at=None,
+        )
+
+        mock_graphql_query.side_effect = [
+            _make_graphql_response([old_open_pr], page_info={'hasNextPage': True, 'endCursor': 'next-page'}),
+            _make_graphql_response([]),
+        ]
+
+        miner_eval = MinerEvaluation(uid=74, hotkey='test_hotkey', github_id='12345', github_pat='fake_pat')
+
+        load_miners_prs(miner_eval, {'goodorg/goodrepo': RepositoryConfig(weight=1.0)})
+
+        assert mock_graphql_query.call_count == 2
+        assert len(miner_eval.open_pull_requests) == 1
+        assert not any('Stopping PR pagination early' in str(c) for c in mock_logging.debug.call_args_list)
 
 
 class TestLoadMinersPrsErrorResilience:
