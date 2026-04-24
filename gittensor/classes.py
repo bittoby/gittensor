@@ -74,6 +74,9 @@ class FileChange:
         test_dir_patterns = [
             r'(^|/)tests?/',
             r'(^|/)__tests?__/',
+            r'(^|/)androidtest[a-z]*/',
+            r'(^|/)integrationtest/',
+            r'(^|/)spec/',
         ]
         if any(re.search(pattern, filename_lower) for pattern in test_dir_patterns):
             return True
@@ -88,9 +91,13 @@ class FileChange:
             r'\.spec\.[^.]+$',
             r'^test\.[^.]+$',
             r'^tests\.[^.]+$',
+            r'_spec\.rb$',
         ]
+        if any(re.search(pattern, basename) for pattern in test_patterns):
+            return True
 
-        return any(re.search(pattern, basename) for pattern in test_patterns)
+        basename_orig = self.filename.split('/')[-1]
+        return bool(re.search(r'[A-Z][A-Za-z0-9]*IT\.(java|kt|kts)$', basename_orig))
 
     @classmethod
     def from_github_response(cls, pr_number: int, repository_full_name: str, file_diff: DefaultDict) -> 'FileChange':
