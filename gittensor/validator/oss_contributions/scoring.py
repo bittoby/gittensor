@@ -227,17 +227,16 @@ def calculate_pr_multipliers(
     pr.repo_weight_multiplier = resolve_repo_weight(repo_config)
     pr.issue_multiplier = round(calculate_issue_multiplier(pr), 2)
     pr.label_multiplier = LABEL_MULTIPLIERS.get(pr.label, 1.0) if pr.label else 1.0
+    pr.review_quality_multiplier = round(calculate_review_quality_multiplier(pr.changes_requested_count), 2)
 
     if is_merged:
         # Spam multiplier is recalculated in finalize_miner_scores with total token score
         pr.open_pr_spam_multiplier = 1.0
         pr.time_decay_multiplier = round(calculate_time_decay_multiplier(pr), 2)
-        pr.review_quality_multiplier = round(calculate_review_quality_multiplier(pr.changes_requested_count), 2)
     else:
         pr.open_pr_spam_multiplier = 1.0
         pr.time_decay_multiplier = 1.0
         pr.credibility_multiplier = 1.0
-        pr.review_quality_multiplier = 1.0
 
 
 def calculate_open_pr_threshold(total_token_score: float = 0.0) -> int:
@@ -520,7 +519,7 @@ def calculate_open_pr_collateral_score(pr: PullRequest) -> float:
 
     Collateral = base_score * applicable_multipliers * OPEN_PR_COLLATERAL_PERCENT
 
-    Applicable multipliers: repo_weight, issue, label
+    Applicable multipliers: repo_weight, issue, label, review_quality
     NOT applicable: time_decay (merge-based), credibility_multiplier (merge-based),
                     open_pr_spam (not for collateral)
     """
@@ -530,6 +529,7 @@ def calculate_open_pr_collateral_score(pr: PullRequest) -> float:
         'repo_weight': pr.repo_weight_multiplier,
         'issue': pr.issue_multiplier,
         'label': pr.label_multiplier,
+        'review_quality': pr.review_quality_multiplier,
     }
 
     potential_score = pr.base_score * prod(multipliers.values())

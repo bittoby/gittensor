@@ -14,10 +14,15 @@ from math import ceil
 
 import pytest
 
-from gittensor.classes import PRState, PullRequest
-from gittensor.constants import REVIEW_PENALTY_RATE
+from gittensor.classes import MinerEvaluation, PRState, PullRequest
+from gittensor.constants import OPEN_PR_COLLATERAL_PERCENT, REVIEW_PENALTY_RATE
 from gittensor.utils.github_api_tools import _MAX_CHANGES_REQUESTED_REVIEWS
-from gittensor.validator.oss_contributions.scoring import calculate_review_quality_multiplier
+from gittensor.validator.oss_contributions.scoring import (
+    calculate_open_pr_collateral_score,
+    calculate_pr_multipliers,
+    calculate_review_quality_multiplier,
+)
+from gittensor.validator.utils.load_weights import RepositoryConfig
 from tests.validator.conftest import PRBuilder
 
 # ============================================================================
@@ -171,10 +176,17 @@ class TestChangesRequestedCountFromGraphQL:
         pr = PullRequest.from_graphql_response(pr_data, uid=1, hotkey='hk', github_id='123')
         assert pr.changes_requested_count == 2
 
-    def test_non_merged_pr_does_not_parse_reviews(self):
-        pr_data = _make_graphql_pr('OPEN', [{'authorAssociation': 'OWNER'}])
+    def test_non_merged_pr_counts_maintainer_reviews(self):
+        pr_data = _make_graphql_pr(
+            'OPEN',
+            [
+                {'authorAssociation': 'OWNER'},
+                {'authorAssociation': 'CONTRIBUTOR'},
+                {'authorAssociation': 'MEMBER'},
+            ],
+        )
         pr = PullRequest.from_graphql_response(pr_data, uid=1, hotkey='hk', github_id='123')
-        assert pr.changes_requested_count == 0
+        assert pr.changes_requested_count == 2
 
 
 def test_max_changes_requested_reviews_matches_penalty_rate():
@@ -182,6 +194,116 @@ def test_max_changes_requested_reviews_matches_penalty_rate():
     # review beyond the cap is already forced to a 0.0 multiplier by calculate_review_quality_multiplier
     assert _MAX_CHANGES_REQUESTED_REVIEWS == ceil(1 / REVIEW_PENALTY_RATE)
     assert calculate_review_quality_multiplier(_MAX_CHANGES_REQUESTED_REVIEWS) == 0.0
+
+
+# ============================================================================
+# TestReviewQualityMultiplierOnOpenPR
+# ============================================================================
+
+
+def _make_repo_config() -> dict:
+    return {'test/repo': RepositoryConfig(weight=1.0)}
+
+
+def _make_eval() -> MinerEvaluation:
+    return MinerEvaluation(uid=0, hotkey='hk', github_id='1')
+
+
+class TestCalculatePrMultipliersForOpenPR:
+    """calculate_pr_multipliers must apply review_quality to OPEN PRs, not just MERGED."""
+
+    def test_open_pr_with_no_cr_reviews_keeps_multiplier_at_one(self, builder):
+        pr = builder.create(state=PRState.OPEN, repo='test/repo')
+        pr.changes_requested_count = 0
+
+        calculate_pr_multipliers(pr, _make_eval(), _make_repo_config())
+
+        assert pr.review_quality_multiplier == 1.0
+
+    def test_open_pr_with_maintainer_cr_reviews_reduces_multiplier(self, builder):
+        pr = builder.create(state=PRState.OPEN, repo='test/repo')
+        pr.changes_requested_count = 3
+
+        calculate_pr_multipliers(pr, _make_eval(), _make_repo_config())
+
+        assert pr.review_quality_multiplier == pytest.approx(0.55)
+
+    def test_open_pr_review_multiplier_can_reach_zero(self, builder):
+        pr = builder.create(state=PRState.OPEN, repo='test/repo')
+        pr.changes_requested_count = _MAX_CHANGES_REQUESTED_REVIEWS
+
+        calculate_pr_multipliers(pr, _make_eval(), _make_repo_config())
+
+        assert pr.review_quality_multiplier == 0.0
+
+    def test_merged_and_open_agree_for_same_cr_count(self, builder):
+        merged = builder.create(state=PRState.MERGED, repo='test/repo')
+        merged.changes_requested_count = 2
+        open_pr = builder.create(state=PRState.OPEN, repo='test/repo')
+        open_pr.changes_requested_count = 2
+
+        calculate_pr_multipliers(merged, _make_eval(), _make_repo_config())
+        calculate_pr_multipliers(open_pr, _make_eval(), _make_repo_config())
+
+        assert merged.review_quality_multiplier == open_pr.review_quality_multiplier
+
+
+class TestOpenPrCollateralAppliesReviewQuality:
+    """calculate_open_pr_collateral_score must fold review_quality into the product."""
+
+    def _prepare(self, builder: PRBuilder, cr_count: int) -> PullRequest:
+        pr = builder.create(state=PRState.OPEN, repo='test/repo')
+        pr.base_score = 100.0
+        pr.repo_weight_multiplier = 1.0
+        pr.issue_multiplier = 1.0
+        pr.label_multiplier = 1.0
+        pr.changes_requested_count = cr_count
+        calculate_pr_multipliers(pr, _make_eval(), _make_repo_config())
+        return pr
+
+    def test_clean_open_pr_collateral_unchanged(self, builder):
+        pr = self._prepare(builder, cr_count=0)
+
+        collateral = calculate_open_pr_collateral_score(pr)
+
+        assert collateral == pytest.approx(100.0 * OPEN_PR_COLLATERAL_PERCENT)
+
+    def test_open_pr_collateral_scales_with_review_quality(self, builder):
+        clean = self._prepare(builder, cr_count=0)
+        penalized = self._prepare(builder, cr_count=3)
+
+        clean_collateral = calculate_open_pr_collateral_score(clean)
+        penalized_collateral = calculate_open_pr_collateral_score(penalized)
+
+        assert penalized_collateral == pytest.approx(clean_collateral * 0.55)
+
+    def test_open_pr_collateral_zeroes_when_review_quality_zero(self, builder):
+        pr = self._prepare(builder, cr_count=_MAX_CHANGES_REQUESTED_REVIEWS)
+
+        assert calculate_open_pr_collateral_score(pr) == 0.0
+
+    def test_open_pr_collateral_matches_projected_merged_earned_score(self, builder):
+        """Regression guard: open-PR collateral should not overstate the merged projection."""
+        cr_count = 3
+
+        open_pr = builder.create(state=PRState.OPEN, repo='test/repo')
+        open_pr.base_score = 80.0
+        open_pr.repo_weight_multiplier = 1.0
+        open_pr.issue_multiplier = 1.33
+        open_pr.label_multiplier = 1.25
+        open_pr.changes_requested_count = cr_count
+        calculate_pr_multipliers(open_pr, _make_eval(), _make_repo_config())
+
+        merged_projection = (
+            open_pr.base_score
+            * open_pr.repo_weight_multiplier
+            * open_pr.issue_multiplier
+            * open_pr.label_multiplier
+            * open_pr.review_quality_multiplier
+        )
+        expected_collateral = merged_projection * OPEN_PR_COLLATERAL_PERCENT
+
+        assert calculate_open_pr_collateral_score(open_pr) == pytest.approx(expected_collateral)
 
 
 if __name__ == '__main__':
