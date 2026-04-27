@@ -26,6 +26,7 @@ run_mirror_issue_discovery = mirror_scan_module.run_mirror_issue_discovery
 _classify_issue = mirror_scan_module._classify_issue
 _build_solving_pr_cache = mirror_scan_module._build_solving_pr_cache
 CachedSolvingPR = mirror_scan_module.CachedSolvingPR
+IssueClassification = mirror_scan_module.IssueClassification
 MirrorIssue = mirror_models.MirrorIssue
 MirrorIssuesResponse = mirror_models.MirrorIssuesResponse
 MirrorPullRequest = mirror_models.MirrorPullRequest
@@ -177,39 +178,39 @@ def _run(coro):
 class TestClassifyIssue:
     def test_clean_completed_merged_is_solved(self):
         issue = MirrorIssue.from_dict(_issue_dict())
-        assert _classify_issue(issue) == 'solved'
+        assert _classify_issue(issue) is IssueClassification.SOLVED
 
     def test_transferred_ignored(self):
         issue = MirrorIssue.from_dict(_issue_dict(is_transferred=True))
-        assert _classify_issue(issue) == 'ignore'
+        assert _classify_issue(issue) is IssueClassification.IGNORE
 
     def test_open_issue_ignored(self):
         issue = MirrorIssue.from_dict(_issue_dict(state='OPEN', state_reason=None, solved_by_pr=None))
-        assert _classify_issue(issue) == 'ignore'
+        assert _classify_issue(issue) is IssueClassification.IGNORE
 
     def test_not_planned_counts_as_closed(self):
         issue = MirrorIssue.from_dict(_issue_dict(state_reason='NOT_PLANNED'))
-        assert _classify_issue(issue) == 'not-solved-closed'
+        assert _classify_issue(issue) is IssueClassification.NOT_SOLVED_CLOSED
 
     def test_null_state_reason_counts_as_closed(self):
         issue = MirrorIssue.from_dict(_issue_dict(state_reason=None, solved_by_pr=None))
-        assert _classify_issue(issue) == 'not-solved-closed'
+        assert _classify_issue(issue) is IssueClassification.NOT_SOLVED_CLOSED
 
     def test_no_solving_pr_counts_as_closed(self):
         issue = MirrorIssue.from_dict(_issue_dict(solved_by_pr=None))
-        assert _classify_issue(issue) == 'not-solved-closed'
+        assert _classify_issue(issue) is IssueClassification.NOT_SOLVED_CLOSED
 
     def test_solving_pr_not_merged_counts_as_closed(self):
         issue = MirrorIssue.from_dict(_issue_dict(solving_pr_state='OPEN'))
-        assert _classify_issue(issue) == 'not-solved-closed'
+        assert _classify_issue(issue) is IssueClassification.NOT_SOLVED_CLOSED
 
     def test_solving_pr_edited_after_merge_counts_as_closed(self):
         issue = MirrorIssue.from_dict(_issue_dict(solving_pr_edited_after_merge=True))
-        assert _classify_issue(issue) == 'not-solved-closed'
+        assert _classify_issue(issue) is IssueClassification.NOT_SOLVED_CLOSED
 
     def test_missing_author_ignored(self):
         issue = MirrorIssue.from_dict(_issue_dict(author_github_id=None))
-        assert _classify_issue(issue) == 'ignore'
+        assert _classify_issue(issue) is IssueClassification.IGNORE
 
 
 # ============================================================================

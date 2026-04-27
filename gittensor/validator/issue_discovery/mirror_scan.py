@@ -32,9 +32,16 @@ the cache so sibling discoveries benefit.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
+
+
+class IssueClassification(Enum):
+    SOLVED = 'solved'
+    NOT_SOLVED_CLOSED = 'not-solved-closed'
+    IGNORE = 'ignore'
 
 from gittensor.classes import Issue, MinerEvaluation
 from gittensor.constants import (
@@ -253,13 +260,13 @@ def _score_miner_mirror_issues(
 
     for issue in issues_sorted:
         classification = _classify_issue(issue)
-        if classification == 'not-solved-closed':
+        if classification is IssueClassification.NOT_SOLVED_CLOSED:
             closed_count += 1
             continue
-        if classification == 'ignore':
+        if classification is IssueClassification.IGNORE:
             continue
 
-        # classification == 'solved'
+        # classification is IssueClassification.SOLVED
         assert issue.solving_pr is not None  # _classify_issue guarantees
         solving_pr = issue.solving_pr
 
@@ -417,38 +424,38 @@ def _resolve_solving_pr_score(
     return cached
 
 
-def _classify_issue(issue: MirrorIssue) -> str:
-    """Return 'solved', 'not-solved-closed', or 'ignore' per anti-gaming gates.
+def _classify_issue(issue: MirrorIssue) -> IssueClassification:
+    """Classify an issue per anti-gaming gates.
 
-    'ignore' = issue is open / transferred / has no scorable meaning at all.
-    'not-solved-closed' = counts against credibility (closed but not solved).
-    'solved' = counts toward solved metrics.
+    IGNORE = issue is open / transferred / has no scorable meaning at all.
+    NOT_SOLVED_CLOSED = counts against credibility (closed but not solved).
+    SOLVED = counts toward solved metrics.
 
     Per-issue debug logs explain each classification so operators can debug
     "why didn't UID X get credit for issue Y?" without guessing.
     """
     if issue.is_transferred:
         bt.logging.debug(f'  issue #{issue.issue_number} ({issue.repo_full_name}): ignore (transferred)')
-        return 'ignore'
+        return IssueClassification.IGNORE
 
     if issue.state != 'CLOSED':
         bt.logging.debug(
             f'  issue #{issue.issue_number} ({issue.repo_full_name}): ignore (state {issue.state}, not CLOSED)'
         )
-        return 'ignore'
+        return IssueClassification.IGNORE
 
     if issue.state_reason != 'COMPLETED':
         bt.logging.debug(
             f'  issue #{issue.issue_number} ({issue.repo_full_name}): closed-not-solved '
             f'(state_reason={issue.state_reason}, need COMPLETED)'
         )
-        return 'not-solved-closed'
+        return IssueClassification.NOT_SOLVED_CLOSED
 
     if not issue.solved_by_pr or not issue.solving_pr:
         bt.logging.debug(
             f'  issue #{issue.issue_number} ({issue.repo_full_name}): closed-not-solved (no solving PR linked)'
         )
-        return 'not-solved-closed'
+        return IssueClassification.NOT_SOLVED_CLOSED
 
     sp = issue.solving_pr
     if sp.state != 'MERGED':
@@ -456,20 +463,20 @@ def _classify_issue(issue: MirrorIssue) -> str:
             f'  issue #{issue.issue_number} ({issue.repo_full_name}): closed-not-solved '
             f'(solving PR #{sp.pr_number} state={sp.state}, not MERGED)'
         )
-        return 'not-solved-closed'
+        return IssueClassification.NOT_SOLVED_CLOSED
 
     if sp.edited_after_merge:
         bt.logging.debug(
             f'  issue #{issue.issue_number} ({issue.repo_full_name}): closed-not-solved '
             f'(solving PR #{sp.pr_number} edited after merge — anti-spec-rewrite gate)'
         )
-        return 'not-solved-closed'
+        return IssueClassification.NOT_SOLVED_CLOSED
 
     if not issue.author_github_id:
         bt.logging.debug(f'  issue #{issue.issue_number} ({issue.repo_full_name}): ignore (missing author_github_id)')
-        return 'ignore'
+        return IssueClassification.IGNORE
 
-    return 'solved'
+    return IssueClassification.SOLVED
 
 
 def _mirror_issue_for_scoring(
