@@ -5,8 +5,10 @@ per IP) and one admin backfill endpoint (not used by the validator). This
 client only covers the scoring-hot-path read endpoints.
 """
 
+import random
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional
 
 import bittensor as bt
@@ -27,6 +29,36 @@ from gittensor.utils.mirror.models import (
 class MirrorRequestError(RuntimeError):
     """Raised when a mirror request fails with a non-retryable status or
     exhausts all retries on transient failures."""
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Parse Retry-After seconds or HTTP-date into a non-negative delay."""
+    if not value:
+        return None
+
+    value = value.strip()
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+
+    return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0.0)
+
+
+def _retry_delay(attempt: int, response: Optional[requests.Response] = None) -> float:
+    """Compute retry delay with capped backoff and bounded jitter."""
+    backoff = min(5 * (2**attempt), 30)
+    retry_after = _parse_retry_after(response.headers.get('Retry-After')) if response is not None else None
+    base_delay = max(backoff, retry_after) if retry_after is not None else backoff
+    return base_delay + (random.uniform(0, 0.5) * base_delay)
 
 
 class MirrorClient:
@@ -94,12 +126,12 @@ class MirrorClient:
             except requests.RequestException as e:
                 last_error = f'request exception: {e}'
                 if attempt < self.max_attempts - 1:
-                    backoff = min(5 * (2**attempt), 30)
+                    delay = _retry_delay(attempt)
                     bt.logging.warning(
                         f'Mirror GET {path} raised {e} '
-                        f'(attempt {attempt + 1}/{self.max_attempts}), retrying in {backoff}s...'
+                        f'(attempt {attempt + 1}/{self.max_attempts}), retrying in {delay:.2f}s...'
                     )
-                    time.sleep(backoff)
+                    time.sleep(delay)
                 continue
 
             if 200 <= response.status_code < 300:
@@ -111,11 +143,11 @@ class MirrorClient:
 
             last_error = f'status {response.status_code}: {response.text[:200]}'
             if attempt < self.max_attempts - 1:
-                backoff = min(5 * (2**attempt), 30)
+                delay = _retry_delay(attempt, response)
                 bt.logging.warning(
                     f'Mirror GET {path} failed ({last_error}) '
-                    f'(attempt {attempt + 1}/{self.max_attempts}), retrying in {backoff}s...'
+                    f'(attempt {attempt + 1}/{self.max_attempts}), retrying in {delay:.2f}s...'
                 )
-                time.sleep(backoff)
+                time.sleep(delay)
 
         raise MirrorRequestError(f'Mirror GET {path} failed after {self.max_attempts} attempts: {last_error}')

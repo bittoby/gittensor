@@ -41,9 +41,9 @@ def _ok(json_body: dict) -> Mock:
     return response
 
 
-def _err(status: int, body: str = 'error') -> Mock:
+def _err(status: int, body: str = 'error', headers: dict | None = None) -> Mock:
     """Build a non-2xx response mock."""
-    return Mock(status_code=status, text=body)
+    return Mock(status_code=status, text=body, headers=headers or {})
 
 
 def _make_client(session: Mock, **kwargs) -> MirrorClient:
@@ -200,23 +200,24 @@ class TestResponseParsing:
 
 
 @patch('gittensor.utils.mirror.client.time.sleep')
+@patch('gittensor.utils.mirror.client.random.uniform')
 @patch('gittensor.utils.mirror.client.bt.logging')
 class TestRetryBehavior:
-    def test_500_then_success_retries_with_backoff(self, _log, mock_sleep):
+    def test_500_then_success_retries_with_jitter(self, _log, mock_uniform, mock_sleep):
         session = Mock()
         session.get.side_effect = [
             _err(500, 'oops'),
             _ok(_minimal_pulls_payload()),
         ]
         client = _make_client(session)
+        mock_uniform.return_value = 0.1
 
         client.get_miner_pulls('218712309')
 
         assert session.get.call_count == 2
-        # Backoff after the first failure: 5s (formula: min(5 * 2**attempt, 30) at attempt=0)
-        mock_sleep.assert_called_once_with(5)
+        mock_sleep.assert_called_once_with(5.5)
 
-    def test_502_502_success_uses_exponential_backoff(self, _log, mock_sleep):
+    def test_502_502_success_uses_exponential_backoff_floor(self, _log, mock_uniform, mock_sleep):
         session = Mock()
         session.get.side_effect = [
             _err(502),
@@ -224,43 +225,60 @@ class TestRetryBehavior:
             _ok(_minimal_pulls_payload()),
         ]
         client = _make_client(session, max_attempts=3)
+        mock_uniform.return_value = 0.0
 
         client.get_miner_pulls('218712309')
 
         assert session.get.call_count == 3
-        # 5 * 2**0 = 5, then 5 * 2**1 = 10
         mock_sleep.assert_has_calls([call(5), call(10)])
 
-    def test_429_is_retried(self, _log, mock_sleep):
-        """429 (Cloudflare rate limit) should retry, unlike other 4xx."""
+    def test_429_with_retry_after_uses_retry_after_floor(self, _log, mock_uniform, mock_sleep):
         session = Mock()
         session.get.side_effect = [
-            _err(429, 'rate limited'),
+            _err(429, 'rate limited', headers={'Retry-After': '20'}),
             _ok(_minimal_pulls_payload()),
         ]
         client = _make_client(session)
+        mock_uniform.return_value = 0.25
 
         client.get_miner_pulls('218712309')
 
         assert session.get.call_count == 2
+        mock_sleep.assert_called_once_with(25.0)
 
-    def test_connection_error_retries(self, _log, mock_sleep):
+    def test_429_with_smaller_retry_after_keeps_backoff_floor(self, _log, mock_uniform, mock_sleep):
+        session = Mock()
+        session.get.side_effect = [
+            _err(429, 'rate limited', headers={'Retry-After': '2'}),
+            _ok(_minimal_pulls_payload()),
+        ]
+        client = _make_client(session)
+        mock_uniform.return_value = 0.0
+
+        client.get_miner_pulls('218712309')
+
+        assert session.get.call_count == 2
+        mock_sleep.assert_called_once_with(5)
+
+    def test_connection_error_retries(self, _log, mock_uniform, mock_sleep):
         session = Mock()
         session.get.side_effect = [
             requests.ConnectionError('boom'),
             _ok(_minimal_pulls_payload()),
         ]
         client = _make_client(session)
+        mock_uniform.return_value = 0.2
 
         client.get_miner_pulls('218712309')
 
         assert session.get.call_count == 2
-        mock_sleep.assert_called_once_with(5)
+        mock_sleep.assert_called_once_with(6.0)
 
-    def test_max_attempts_exhausted_raises(self, _log, mock_sleep):
+    def test_max_attempts_exhausted_raises(self, _log, mock_uniform, mock_sleep):
         session = Mock()
         session.get.return_value = _err(503, 'unavailable')
         client = _make_client(session, max_attempts=3)
+        mock_uniform.return_value = 0.0
 
         with pytest.raises(MirrorRequestError, match='after 3 attempts'):
             client.get_miner_pulls('218712309')
@@ -269,10 +287,11 @@ class TestRetryBehavior:
         # 2 sleeps between 3 attempts (none after the last)
         assert mock_sleep.call_count == 2
 
-    def test_max_attempts_exhausted_on_connection_errors(self, _log, mock_sleep):
+    def test_max_attempts_exhausted_on_connection_errors(self, _log, mock_uniform, mock_sleep):
         session = Mock()
         session.get.side_effect = requests.Timeout('slow')
         client = _make_client(session, max_attempts=3)
+        mock_uniform.return_value = 0.0
 
         with pytest.raises(MirrorRequestError, match='after 3 attempts'):
             client.get_miner_pulls('218712309')
@@ -281,11 +300,12 @@ class TestRetryBehavior:
 
 
 @patch('gittensor.utils.mirror.client.time.sleep')
+@patch('gittensor.utils.mirror.client.random.uniform')
 @patch('gittensor.utils.mirror.client.bt.logging')
 class TestFailFast4xx:
     """4xx other than 429 indicates a client error — retry won't help."""
 
-    def test_404_fails_fast_no_retry(self, _log, mock_sleep):
+    def test_404_fails_fast_no_retry(self, _log, _mock_uniform, mock_sleep):
         session = Mock()
         session.get.return_value = _err(404, 'not found')
         client = _make_client(session, max_attempts=3)
@@ -296,7 +316,7 @@ class TestFailFast4xx:
         assert session.get.call_count == 1
         mock_sleep.assert_not_called()
 
-    def test_400_fails_fast_no_retry(self, _log, mock_sleep):
+    def test_400_fails_fast_no_retry(self, _log, _mock_uniform, mock_sleep):
         session = Mock()
         session.get.return_value = _err(400, 'bad request')
         client = _make_client(session)
@@ -307,7 +327,7 @@ class TestFailFast4xx:
         assert session.get.call_count == 1
         mock_sleep.assert_not_called()
 
-    def test_403_fails_fast_no_retry(self, _log, mock_sleep):
+    def test_403_fails_fast_no_retry(self, _log, _mock_uniform, mock_sleep):
         session = Mock()
         session.get.return_value = _err(403, 'forbidden')
         client = _make_client(session)
